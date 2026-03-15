@@ -347,28 +347,47 @@ class SessionStore:
             permission_mode=cur.get("permission_mode", PERMISSION_MODE),
         )
 
-    def on_claude_response(self, user_id: str, new_session_id: str, first_message: str):
+    def on_claude_response(self, user_id: str, chat_id: str, new_session_id: str, first_message: str):
         """Claude 回复后用返回的 session_id 更新状态"""
-        user = self._user(user_id)
-        cur = user["current"]
+        chat_key = "private" if chat_id == user_id else chat_id
+
+        if user_id not in self._data:
+            self._data[user_id] = {}
+
+        if chat_key not in self._data[user_id]:
+            self._data[user_id][chat_key] = {
+                "current": {
+                    "session_id": None,
+                    "model": DEFAULT_MODEL,
+                    "cwd": DEFAULT_CWD,
+                    "permission_mode": PERMISSION_MODE,
+                    "started_at": datetime.now().isoformat(),
+                    "preview": "",
+                },
+                "history": [],
+            }
+
+        chat_data = self._data[user_id][chat_key]
+        cur = chat_data["current"]
         old_id = cur.get("session_id")
 
         if old_id and old_id != new_session_id:
             # 归档旧 session（先去重，避免同一 session_id 重复出现）
-            user["history"] = [h for h in user["history"] if h["session_id"] != old_id]
-            user["history"].append({
+            chat_data["history"] = [h for h in chat_data["history"] if h["session_id"] != old_id]
+            chat_data["history"].append({
                 "session_id": old_id,
                 "started_at": cur.get("started_at", ""),
                 "preview": cur.get("preview", ""),
             })
-            user["history"] = user["history"][-20:]
+            chat_data["history"] = chat_data["history"][-20:]
             cur["started_at"] = datetime.now().isoformat()
             # 为归档的 session 生成摘要（best-effort）
-            if not user.get("summaries", {}).get(old_id):
+            summaries = self._data[user_id].get("summaries", {})
+            if not summaries.get(old_id):
                 try:
                     summary = generate_summary(old_id)
                     if summary:
-                        user.setdefault("summaries", {})[old_id] = summary
+                        self._data[user_id].setdefault("summaries", {})[old_id] = summary
                         _write_custom_title(old_id, summary)
                 except Exception:
                     pass

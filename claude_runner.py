@@ -17,11 +17,9 @@ async def run_claude(
     model: Optional[str] = None,
     cwd: Optional[str] = None,
     permission_mode: Optional[str] = None,
-    on_text_chunk: Optional[Callable[[str], None]] = None,
-    on_tool_use: Optional[Callable[[str, dict], None]] = None,
 ) -> tuple[str, Optional[str]]:
     """
-    调用 claude CLI 并流式解析输出。
+    调用 claude CLI 并返回完整回复（不再流式）。
 
     Returns:
         (full_response_text, new_session_id)
@@ -59,17 +57,6 @@ async def run_claude(
     full_text = ""
     new_session_id = None
 
-    # 跟踪当前正在构建的 tool_use block
-    pending_tool_name = ""
-    pending_tool_input_json = ""
-
-    async def _fire_tool_use(name: str, inp: dict):
-        if on_tool_use:
-            if asyncio.iscoroutinefunction(on_tool_use):
-                await on_tool_use(name, inp)
-            else:
-                on_tool_use(name, inp)
-
     async for raw_line in proc.stdout:
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
@@ -99,34 +86,18 @@ async def run_claude(
                     chunk = delta.get("text", "")
                     if chunk:
                         full_text += chunk
-                        if on_text_chunk:
-                            if asyncio.iscoroutinefunction(on_text_chunk):
-                                await on_text_chunk(chunk)
-                            else:
-                                on_text_chunk(chunk)
 
                 elif delta_type == "input_json_delta":
-                    # 积累 tool_use 的 input JSON 片段
-                    pending_tool_input_json += delta.get("partial_json", "")
+                    # Skip tool input tracking since we don't need callbacks
+                    pass
 
             elif evt_type == "content_block_start":
-                block = evt.get("content_block", {})
-                if block.get("type") == "tool_use":
-                    pending_tool_name = block.get("name", "")
-                    pending_tool_input_json = ""
-                    # 立即触发一次回调（name 已知，input 还空），用于显示进度
-                    await _fire_tool_use(pending_tool_name, {})
+                # Skip tool tracking
+                pass
 
             elif evt_type == "content_block_stop":
-                # tool_use block 结束，input 已完整，再触发一次带完整参数的回调
-                if pending_tool_name and pending_tool_input_json:
-                    try:
-                        inp = json.loads(pending_tool_input_json)
-                    except json.JSONDecodeError:
-                        inp = {}
-                    await _fire_tool_use(pending_tool_name, inp)
-                pending_tool_name = ""
-                pending_tool_input_json = ""
+                # Skip tool tracking
+                pass
 
         elif event_type == "result":
             sid = data.get("session_id")

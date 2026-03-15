@@ -170,40 +170,7 @@ async def _process_message(user_id: str, chat_id: str, msg):
         await feishu.send_text_to_user(user_id, f"❌ 发送消息失败：{e}")
         return
 
-    accumulated = ""
-    chars_since_push = 0
-
-    async def push(content: str):
-        try:
-            await feishu.update_card(card_msg_id, content)
-        except Exception as push_err:
-            print(f"[warn] push 失败: {push_err}", flush=True)
-
-    # 2. 工具调用回调：在卡片顶部显示进度
-    async def on_tool_use(name: str, inp: dict):
-        nonlocal accumulated, chars_since_push
-        # AskUserQuestion: 把问题内容直接作为正文显示
-        if name.lower() == "askuserquestion":
-            question = inp.get("question", inp.get("text", ""))
-            if question:
-                accumulated += f"\n\n❓ **等待回复：**\n{question}"
-                chars_since_push = 0
-                await push(accumulated)
-                return
-        tool_line = _format_tool(name, inp)
-        display = f"{tool_line}\n\n{accumulated}" if accumulated else tool_line
-        await push(display)
-
-    # 3. 文本流回调：积累后批量推送
-    async def on_text_chunk(chunk: str):
-        nonlocal accumulated, chars_since_push
-        accumulated += chunk
-        chars_since_push += len(chunk)
-        if chars_since_push >= config.STREAM_CHUNK_SIZE:
-            await push(accumulated)
-            chars_since_push = 0
-
-    # 4. 运行 Claude
+    # 2. 运行 Claude，等待完整回复
     # 新 session 第一条消息带环境提示
     claude_msg = text
     if not session.session_id:
@@ -221,23 +188,31 @@ async def _process_message(user_id: str, chat_id: str, msg):
             model=session.model,
             cwd=session.cwd,
             permission_mode=session.permission_mode,
-            on_text_chunk=on_text_chunk,
-            on_tool_use=on_tool_use,
         )
         print(f"[run_claude] 完成, session={new_session_id}", flush=True)
     except Exception as e:
         print(f"[error] Claude 运行失败: {type(e).__name__}: {e}", flush=True)
         traceback.print_exc()
-        await push(f"❌ Claude 执行出错：{type(e).__name__}: {e}")
+        try:
+            await feishu.update_card(card_msg_id, f"❌ Claude 执行出错：{type(e).__name__}: {e}")
+        except Exception:
+            pass
         return
 
-    # 5. 推送最终内容
-    final = full_text or accumulated or "（无输出）"
-    await push(final)
+    # 3. 一次性更新卡片为完整内容
+    final = full_text or "（无输出）"
+    try:
+        await feishu.update_card(card_msg_id, final)
+    except Exception as e:
+        print(f"[error] 更新卡片失败: {e}", flush=True)
+        # 占位卡片保留，用户知道在处理中
 
-    # 6. 更新 session 状态
+    # 4. 更新 session 状态
     if new_session_id:
-        store.on_claude_response(user_id, new_session_id, text)
+        # Note: on_claude_response still uses old signature, need to update
+        store.on_claude_response(user_id, chat_id, new_session_id, text)
+
+
 
 
 def _format_tool(name: str, inp: dict) -> str:
